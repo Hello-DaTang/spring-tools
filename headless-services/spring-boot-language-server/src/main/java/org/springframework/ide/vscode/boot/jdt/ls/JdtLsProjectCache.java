@@ -16,7 +16,6 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLDecoder;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -62,7 +61,6 @@ public class JdtLsProjectCache implements InitializableJavaProjectsService, Serv
 	private static final String CMD_SPRING_BOOT_ENABLE_CLASSPATH_LISTENING = "sts.vscode-spring-boot.enableClasspathListening";
 	private static final String VSCODE_JAVA_INTERNAL_PROJECT_NAME = "jdt.ls-java-project";
 	
-	private static final Duration INITIALIZE_TIMEOUT = Duration.ofSeconds(10);
 	private static final Object JDT_SCHEME = "jdt";
 
 	private final boolean IS_JANDEX_INDEX;
@@ -76,6 +74,7 @@ public class JdtLsProjectCache implements InitializableJavaProjectsService, Serv
 	final private Disposable.Swap DISPOSABLE = Disposables.swap();
 	
 	private Mono<Disposable> classpathListenerRequest;
+	private Disposable classpathListenerRegistration;
 	
 	private boolean classpathListenerEnabled;
 	
@@ -268,33 +267,78 @@ public class JdtLsProjectCache implements InitializableJavaProjectsService, Serv
 	
 	private synchronized void enableClasspathListener(boolean enabled) {
 		log.info("Enable classpath listener enabled = " + enabled + " current enablement = " + classpathListenerEnabled);
-		if (classpathListenerEnabled != enabled) {
-			if (enabled) {
-				log.info("Adding classpath listener enabled=" + enabled);
-				classpathListenerEnabled = true;
-				notifyProjectObserverSupported();
-				classpathListenerRequest = server.addClasspathListener(CLASSPATH_LISTENER).timeout(INITIALIZE_TIMEOUT)
-						.doOnSubscribe(x -> log.debug("addClasspathListener ..."))
-						.doOnSuccess(x -> log.debug("addClasspathListener DONE"))
-						.doOnError(t -> {
-							log.error("Unexpected error registering classpath listener with JDT.", t);
-							enableClasspathListener(false);
-						});
-				final Mono<Disposable> oldClasspathSubscription = classpathListenerRequest;
-				classpathListenerRequest.subscribe(d -> {
-					if (oldClasspathSubscription != classpathListenerRequest) {
-						d.dispose();
-					} else {
-						DISPOSABLE.update(d);
-					}
-				});
+		if (enabled) {
+			if (classpathListenerEnabled || classpathListenerRequest != null) {
+				return;
+			}
+
+			/*
+			 * Do not put a wall-clock timeout around this request. On large workspaces the
+			 * JDT extension can start streaming the initial classpath snapshot before the
+			 * JSON-RPC response to sts.java.addClasspathListener reaches Boot LS. The
+			 * callback channel is already functional during that period. Cancelling it on a
+			 * timeout unregisters the callback command while JDT still has queued events,
+			 * causing command-not-found errors and an empty project cache.
+			 */
+			log.info("Adding classpath listener without a destructive registration timeout");
+			classpathListenerEnabled = true;
+			notifyProjectObserverSupported();
+
+			final Mono<Disposable> request = server.addClasspathListener(CLASSPATH_LISTENER)
+					.doOnSubscribe(x -> log.debug("addClasspathListener ..."))
+					.doOnSuccess(x -> log.debug("addClasspathListener DONE"));
+
+			classpathListenerRequest = request;
+			Disposable registration = request.subscribe(
+					disposable -> completeClasspathListenerRegistration(request, disposable),
+					error -> failClasspathListenerRegistration(request, error)
+			);
+			if (classpathListenerRequest == request) {
+				classpathListenerRegistration = registration;
 			} else {
-				log.info("Removing classpath listener enabled=" + enabled);
-				DISPOSABLE.update(Disposables.single());
-				classpathListenerRequest = null;
-				classpathListenerEnabled = false;
+				registration.dispose();
+			}
+		} else {
+			log.info("Removing classpath listener enabled=false");
+			classpathListenerRequest = null;
+			if (classpathListenerRegistration != null) {
+				classpathListenerRegistration.dispose();
+				classpathListenerRegistration = null;
+			}
+			DISPOSABLE.update(Disposables.single());
+			boolean changed = classpathListenerEnabled;
+			classpathListenerEnabled = false;
+			if (changed) {
 				notifyProjectObserverSupported();
 			}
+		}
+	}
+
+	private synchronized void completeClasspathListenerRegistration(Mono<Disposable> request, Disposable disposable) {
+		if (request != classpathListenerRequest) {
+			disposable.dispose();
+			return;
+		}
+
+		classpathListenerRequest = null;
+		classpathListenerRegistration = null;
+		DISPOSABLE.update(disposable);
+		log.info("Classpath listener registration response received; initial snapshot channel remains active.");
+	}
+
+	private synchronized void failClasspathListenerRegistration(Mono<Disposable> request, Throwable error) {
+		if (request != classpathListenerRequest) {
+			return;
+		}
+
+		classpathListenerRequest = null;
+		classpathListenerRegistration = null;
+		DISPOSABLE.update(Disposables.single());
+		boolean changed = classpathListenerEnabled;
+		classpathListenerEnabled = false;
+		log.error("Unable to register classpath listener with JDT.", error);
+		if (changed) {
+			notifyProjectObserverSupported();
 		}
 	}
 	

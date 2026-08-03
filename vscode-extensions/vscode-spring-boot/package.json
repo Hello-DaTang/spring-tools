@@ -1,13 +1,13 @@
 {
   "name": "vscode-spring-boot",
-  "displayName": "Spring Boot Tools",
-  "description": "Provides validation and content assist for Spring Boot `application.properties`, `application.yml` properties files. As well as Boot-specific support for `.java` files.",
+  "displayName": "Spring Boot Tools (Root-Fix Build)",
+  "description": "Unofficial EPL-1.0 root-fix build of Spring Boot Tools. Keeps the JDT classpath callback alive while large initial workspace snapshots are streamed.",
   "icon": "spring-boot-logo.png",
-  "version": "2.4.0",
+  "version": "2.4.2",
   "publisher": "vmware",
   "repository": {
     "type": "git",
-    "url": "https://github.com/spring-projects/spring-tools.git"
+    "url": "https://github.com/Hello-DaTang/spring-tools.git"
   },
   "license": "EPL-1.0",
   "engines": {
@@ -1629,5 +1629,11 @@
   "extensionDependencies": [
     "redhat.java",
     "vscjava.vscode-maven"
-  ]
+  ],
+  "rootFixBuild": {
+    "upstream": "https://github.com/spring-projects/spring-tools",
+    "fork": "https://github.com/Hello-DaTang/spring-tools",
+    "branch": "rootfix/classpath-listener-backpressure-v2",
+    "patch": "classpath-listener-backpressure-v2"
+  }
 }
