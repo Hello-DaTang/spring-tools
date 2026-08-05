@@ -125,12 +125,25 @@ jobs:
           This VSIX retains extension ID `vmware.vscode-spring-boot`, so install it with `--force` to replace the Marketplace build.
           EOF
 
+          # A fixed rolling tag is used for this private fork build. Recreate the
+          # release so both the tag and uploaded assets always come from TARGET_SHA.
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
-          else
-            gh release create "$RELEASE_TAG" release-assets/* \
+            gh release delete "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --target "$TARGET_SHA" \
-              --title "Spring Boot Tools Root-Fix ${PATCHED_VERSION} (r2)" \
-              --notes-file release-notes.md
+              --cleanup-tag \
+              --yes
+          elif git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            git push origin ":refs/tags/$RELEASE_TAG"
+          fi
+
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$TARGET_SHA" \
+            --title "Spring Boot Tools Root-Fix ${PATCHED_VERSION} (r2)" \
+            --notes-file release-notes.md
+
+          TAG_SHA="$(git ls-remote origin "refs/tags/$RELEASE_TAG" | awk '{print $1}')"
+          if [ "$TAG_SHA" != "$TARGET_SHA" ]; then
+            echo "Release tag mismatch: expected $TARGET_SHA, got ${TAG_SHA:-<missing>}" >&2
+            exit 1
           fi
