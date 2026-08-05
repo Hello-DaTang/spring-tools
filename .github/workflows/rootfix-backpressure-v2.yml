@@ -1,0 +1,149 @@
+name: Root-Fix Backpressure v2
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - rootfix/classpath-listener-backpressure-v2
+    paths:
+      - 'scripts/apply-classpath-listener-backpressure-v2.py'
+      - '.github/workflows/rootfix-backpressure-v2.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rootfix-classpath-listener-backpressure-v2
+  cancel-in-progress: false
+
+env:
+  PATCHED_VERSION: 2.4.2
+  RELEASE_TAG: spring-tools-rootfix-v2.4.2-r2
+
+jobs:
+  patch-build-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rootfix/classpath-listener-backpressure-v2
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: '**/pom.xml'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Apply source-level root fix
+        run: python3 scripts/apply-classpath-listener-backpressure-v2.py .
+
+      - name: Verify patched source
+        shell: bash
+        run: |
+          set -euo pipefail
+          CACHE='headless-services/spring-boot-language-server/src/main/java/org/springframework/ide/vscode/boot/jdt/ls/JdtLsProjectCache.java'
+          PACKAGE='vscode-extensions/vscode-spring-boot/package.json'
+          grep -q 'without a destructive registration timeout' "$CACHE"
+          ! grep -q 'INITIALIZE_TIMEOUT' "$CACHE"
+          test "$(node -p "require('./$PACKAGE').version")" = "$PATCHED_VERSION"
+          test "$(node -p "require('./$PACKAGE').rootFixBuild.patch")" = 'classpath-listener-backpressure-v2'
+          git diff --check
+
+      - name: Commit patched source to fork branch
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add \
+              headless-services/spring-boot-language-server/src/main/java/org/springframework/ide/vscode/boot/jdt/ls/JdtLsProjectCache.java \
+              headless-services/commons/commons-language-server/src/main/java/org/springframework/ide/vscode/commons/languageserver/java/ls/ClasspathListenerManager.java \
+              vscode-extensions/vscode-spring-boot/package.json
+            git commit -m "Fix classpath listener backpressure for large workspaces"
+            git push origin HEAD:rootfix/classpath-listener-backpressure-v2
+          fi
+          echo "target_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build Spring Boot language server and VSIX
+        shell: bash
+        working-directory: vscode-extensions/vscode-spring-boot
+        run: |
+          set -euo pipefail
+          chmod +x scripts/preinstall.sh
+          chmod +x ../../headless-services/spring-boot-language-server/build.sh
+          chmod +x ../../headless-services/spring-boot-language-server/remove-signatures.sh
+          ./scripts/preinstall.sh
+          npm install --no-audit --no-fund
+          npm run check-types
+          npm run vsce-package
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          SOURCE_VSIX="$(find vscode-extensions/vscode-spring-boot -maxdepth 1 -type f -name '*.vsix' -print -quit)"
+          test -n "$SOURCE_VSIX"
+          cp "$SOURCE_VSIX" "release-assets/spring-boot-tools-rootfix-${PATCHED_VERSION}.vsix"
+          sha256sum release-assets/* > release-assets/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spring-boot-tools-rootfix-${{ env.PATCHED_VERSION }}
+          path: release-assets/*
+          if-no-files-found: error
+
+      - name: Publish fork release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ steps.source.outputs.target_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'EOF'
+          ## Spring Boot Tools Root-Fix — classpath backpressure v2
+
+          Built directly from the `Hello-DaTang/spring-tools` fork branch `rootfix/classpath-listener-backpressure-v2`.
+
+          Changes:
+
+          - removes the destructive wall-clock timeout around initial JDT classpath-listener registration;
+          - keeps the callback command alive while large initial classpath snapshots are streaming;
+          - handles genuine terminal errors explicitly, avoiding Reactor `onErrorDropped`;
+          - makes callback cleanup idempotent;
+          - preserves Beans and Endpoint Mappings while large multi-module workspaces finish indexing.
+
+          This VSIX retains extension ID `vmware.vscode-spring-boot`, so install it with `--force` to replace the Marketplace build.
+          EOF
+
+          # A fixed rolling tag is used for this private fork build. Recreate the
+          # release so both the tag and uploaded assets always come from TARGET_SHA.
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cleanup-tag \
+              --yes
+          elif git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            git push origin ":refs/tags/$RELEASE_TAG"
+          fi
+
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$TARGET_SHA" \
+            --title "Spring Boot Tools Root-Fix ${PATCHED_VERSION} (r2)" \
+            --notes-file release-notes.md
+
+          TAG_SHA="$(git ls-remote origin "refs/tags/$RELEASE_TAG" | awk '{print $1}')"
+          if [ "$TAG_SHA" != "$TARGET_SHA" ]; then
+            echo "Release tag mismatch: expected $TARGET_SHA, got ${TAG_SHA:-<missing>}" >&2
+            exit 1
+          fi

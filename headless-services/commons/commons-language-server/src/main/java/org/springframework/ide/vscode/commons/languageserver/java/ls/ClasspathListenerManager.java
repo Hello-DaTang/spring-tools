@@ -13,6 +13,7 @@ package org.springframework.ide.vscode.commons.languageserver.java.ls;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.lang3.RandomStringUtils;
 import org.eclipse.lsp4j.ExecuteCommandParams;
@@ -135,7 +136,11 @@ public class ClasspathListenerManager {
 				server.getClient().addClasspathListener(new ClasspathListenerParams(callbackCommandId, true))
 		));
 
+		AtomicBoolean cleanupStarted = new AtomicBoolean();
 		Disposable cleanups = () -> {
+			if (!cleanupStarted.compareAndSet(false, true)) {
+				return;
+			}
 			log.info("Unregistering classpath callback "+callbackCommandId +" ...");
 			AsyncRunner.thenLog(log,
 					this.server.getClient().removeClasspathListener(new ClasspathListenerParams(callbackCommandId))
@@ -151,7 +156,9 @@ public class ClasspathListenerManager {
 		return
 			registerCallbackCommand
 			.then(registerClasspathListener)
-			.thenReturn(cleanups);
+			.thenReturn(cleanups)
+			.doOnError(error -> cleanups.dispose())
+			.doOnCancel(cleanups::dispose);
 	}
 
 }
